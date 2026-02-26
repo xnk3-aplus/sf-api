@@ -1,0 +1,245 @@
+<apex:page standardController="Contract__c" lightningStylesheets="true">
+    <apex:form >
+        <apex:pageBlock title="Generate Production Order (LSX)">
+            <apex:pageBlockSection columns="1">
+                <apex:pageBlockSectionItem >
+                    <apex:outputLabel value="Contract ID:" />
+                    <apex:outputText value="{!Contract__c.Id}" />
+                </apex:pageBlockSectionItem>
+                
+                <apex:pageBlockSectionItem >
+                    <apex:outputLabel value="Contract Name:" />
+                    <apex:outputText value="{!Contract__c.Name}" />
+                </apex:pageBlockSectionItem>
+                
+                <apex:pageBlockSectionItem >
+                    <apex:outputLabel value="Status:" />
+                    <apex:outputPanel id="statusPanel">
+                        <span id="statusMessage" style="font-weight: bold;"></span>
+                    </apex:outputPanel>
+                </apex:pageBlockSectionItem>
+            </apex:pageBlockSection>
+            
+            <apex:pageBlockButtons location="bottom">
+                <button type="button" 
+                        class="btn btn-primary" 
+                        id="generateButton" 
+                        onclick="generateDocument(); return false;">
+                    Generate LSX
+                </button>
+            </apex:pageBlockButtons>
+        </apex:pageBlock>
+    </apex:form>
+    
+    <script>
+        // API Configuration
+        const API_BASE_URL = 'https://sf-api-three.vercel.app';
+        const RECORD_ID = '{!Contract__c.Id}';
+        const RECORD_NAME = '{!JSENCODE(Contract__c.Name)}';
+        
+        // Get Session ID for Salesforce API calls (needed to delete old files)
+        const SESSION_ID = '{!$Api.Session_ID}';
+        
+        // Update status message
+        function setStatus(message, type) {
+            const statusEl = document.getElementById('statusMessage');
+            statusEl.textContent = message;
+            
+            // Set color based on type
+            if (type === 'loading') {
+                statusEl.style.color = '#0070d2'; // Blue
+            } else if (type === 'success') {
+                statusEl.style.color = '#04844b'; // Green
+            } else if (type === 'error') {
+                statusEl.style.color = '#c23934'; // Red
+            }
+        }
+        
+        // Close modal and refresh parent
+        function closeAndRefresh() {
+            try {
+                // Method 1: Salesforce Lightning (Quick Action)
+                if (typeof sforce !== 'undefined' && sforce.one) {
+                    sforce.one.back(true);
+                    return;
+                }
+                
+                // Method 2: Lightning Component Context
+                if (window.parent && window.parent.$A) {
+                    window.parent.$A.get('e.force:refreshView').fire();
+                    window.parent.$A.get("e.force:closeQuickAction").fire();
+                    return;
+                }
+                
+                // Method 3: Visualforce in iframe
+                if (window.parent && window.parent !== window) {
+                    window.parent.location.href = window.parent.location.href;
+                    return;
+                }
+                
+                // Method 4: Fallback - reload current window
+                window.location.reload();
+                
+            } catch (e) {
+                console.error('Error closing modal:', e);
+                window.location.reload();
+            }
+        }
+        
+        // --- NEW FUNCTION: Delete old "Production_Order_" files ---
+        async function deleteOldFiles() {
+            setStatus('Checking for old files...', 'loading');
+            
+            try {
+                // 1. Query for ContentDocumentLinks attached to this record where title starts with "Production_Order_"
+                const query = `SELECT ContentDocumentId FROM ContentDocumentLink WHERE LinkedEntityId = '${RECORD_ID}' AND ContentDocument.Title LIKE 'Production_Order_%'`;
+                const queryUrl = window.location.origin + '/services/data/v57.0/query/?q=' + encodeURIComponent(query);
+
+                const queryResponse = await fetch(queryUrl, {
+                    method: 'GET',
+                    headers: {
+                        'Authorization': 'Bearer ' + SESSION_ID,
+                        'Content-Type': 'application/json'
+                    }
+                });
+
+                if (!queryResponse.ok) {
+                    console.warn("Could not query old files, proceeding to generation anyway.");
+                    return;
+                }
+
+                const queryData = await queryResponse.json();
+                
+                if (queryData.records && queryData.records.length > 0) {
+                    setStatus(`Deleting ${queryData.records.length} old file(s)...`, 'loading');
+                    
+                    // 2. Loop through and delete the ContentDocuments
+                    const deletePromises = queryData.records.map(record => {
+                        const docId = record.ContentDocumentId;
+                        const deleteUrl = window.location.origin + '/services/data/v57.0/sobjects/ContentDocument/' + docId;
+                        
+                        return fetch(deleteUrl, {
+                            method: 'DELETE',
+                            headers: {
+                                'Authorization': 'Bearer ' + SESSION_ID
+                            }
+                        });
+                    });
+
+                    await Promise.all(deletePromises);
+                    console.log('Old files deleted successfully');
+                }
+                
+            } catch (error) {
+                console.error('Error deleting old files:', error);
+                // We do not stop the process here; we log the error and allow generation to proceed
+            }
+        }
+        
+        // Call API to generate document
+        async function generateDocument() {
+            const button = document.getElementById('generateButton');
+            
+            try {
+                // Disable button and show loading
+                button.disabled = true;
+                button.textContent = 'Processing...';
+                
+                // --- STEP 1: Delete Old Files ---
+                await deleteOldFiles();
+
+                // --- STEP 2: Generate New File ---
+                setStatus('Calling API to generate LSX...', 'loading');
+                button.textContent = 'Generating...';
+                
+                // Call the API
+                const response = await fetch(API_BASE_URL + '/generate-production-order/' + RECORD_ID, {
+                    method: 'GET',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    }
+                });
+                
+                // Log response for debugging
+                console.log('Response status:', response.status);
+                console.log('Response ok:', response.ok);
+                
+                if (response.ok) {
+                    // Parse JSON response
+                    const data = await response.json();
+                    console.log('Response data:', data);
+                    
+                    // Success
+                    const fileName = data.file_name || 'Document';
+                    const fileId = data.salesforce_content_version_id || data.file_id || '';
+
+                    setStatus('LSX generated and attached successfully!', 'success');
+                    button.textContent = 'Complete';
+                    
+                    // Show file info
+                    console.log('File ID:', fileId);
+                    console.log('File Name:', fileName);
+                    
+                    // Close modal and refresh after 1.5 seconds
+                    setTimeout(function() {
+                        closeAndRefresh();
+                    }, 1500);
+                        
+                } else {
+                    // HTTP error
+                    const errorText = await response.text();
+                    console.error('HTTP error:', response.status, errorText);
+                    setStatus('Error: HTTP ' + response.status + ' ' + errorText, 'error');
+                    button.disabled = false;
+                    button.textContent = 'Generate LSX';
+                }
+                
+            } catch (error) {
+                // Network or parsing error
+                console.error('Generate error:', error);
+                setStatus('Error: ' + error.message, 'error');
+                button.disabled = false;
+                button.textContent = 'Generate LSX';
+            }
+        }
+        
+        // Initialize
+        document.addEventListener('DOMContentLoaded', function() {
+            setStatus('Ready to generate LSX', 'loading');
+        });
+    </script>
+    
+    <style>
+        .btn {
+            border: 1px solid transparent;
+            padding: 8px 16px;
+            font-size: 14px;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: all 0.2s;
+            font-weight: 500;
+        }
+        
+        .btn-primary {
+            background-color: #0070d2;
+            border-color: #0070d2;
+            color: #fff;
+        }
+        
+        .btn-primary:hover:not(:disabled) {
+            background-color: #005fb2;
+            border-color: #005fb2;
+        }
+        
+        .btn:disabled {
+            background-color: #ccc;
+            border-color: #ccc;
+            cursor: not-allowed;
+            opacity: 0.6;
+        }
+        
+        #statusMessage {
+            font-size: 13px;
+        }
+    </style>
+</apex:page>
